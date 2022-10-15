@@ -16,7 +16,7 @@ if not "_inputs" in config:
     print("no _inputs in config.json.. can't generate bids structure without it")
     sys.exit(1)
 
-intended_paths = []
+intended_paths = dict()
 
 #map the path specified by keys for each input
 multi_counts = {} #to handle mulltiple inputs
@@ -34,6 +34,8 @@ for id, input in enumerate(config["_inputs"]):
             input["_key2path"][key] = config[key]
 
 #now construct bids structure!
+T1_ids,T2_ids,dwi_ids,func_ids = [],[],[],[]
+fmap_dest,fmap_dir = {},{}
 for id, input in enumerate(config["_inputs"]):
     path="bids"
 
@@ -143,7 +145,7 @@ for id, input in enumerate(config["_inputs"]):
 
     #just grab the first item in keys to lookup dirname..
     first_key = input["keys"][0]
-    input_dir = os.path.dirname(input["_key2path"][first_key])
+    input_dir = os.path.dirname(input["_key2path"][first_key]) # works if first_key points somewhere
 
     dest=path+"/"+name
     short_dest=path+"/"+short_name #does not contain task and run
@@ -158,10 +160,18 @@ for id, input in enumerate(config["_inputs"]):
         utils.link(src, dest+"_T1w.nii.gz")
         utils.outputSidecar(dest+"_T1w.json", input)
 
+        dest_under_sub = "/".join(dest.split("/")[2:])
+        intended_paths[id] = dest_under_sub+"_T1w.nii.gz"
+        T1_ids.append(id)
+
     elif input["datatype"] == utils.ANAT_T2W:
         src=os.path.join(input_dir, 't2.nii.gz')
         utils.link(src, dest+"_T2w.nii.gz")
         utils.outputSidecar(dest+"_T2w.json", input)
+
+        dest_under_sub = "/".join(dest.split("/")[2:])
+        intended_paths[id] = dest_under_sub+"_T2w.nii.gz"
+        T2_ids.append(id)
 
     elif input["datatype"] == utils.DWI:
         src=os.path.join(input_dir, 'dwi.nii.gz')
@@ -178,7 +188,8 @@ for id, input in enumerate(config["_inputs"]):
         utils.outputSidecar(dest+"_dwi.json", input)
 
         dest_under_sub = "/".join(dest.split("/")[2:])
-        intended_paths.append(dest_under_sub+"_dwi.nii.gz")
+        intended_paths[id] = dest_under_sub+"_dwi.nii.gz"
+        dwi_ids.append(id)
 
     elif input["datatype"] == utils.FUNC_TASK:
         src=os.path.join(input_dir, 'bold.nii.gz')
@@ -199,7 +210,8 @@ for id, input in enumerate(config["_inputs"]):
         utils.outputSidecar(dest+"_bold.json", input)
 
         dest_under_sub = "/".join(dest.split("/")[2:])
-        intended_paths.append(dest_under_sub+"_bold.nii.gz")
+        intended_paths[id] = dest_under_sub+"_bold.nii.gz"
+        func_ids.append(id)
 
     elif input["datatype"] == utils.FUNC_REGRESSORS:
         src=os.path.join(input_dir, 'regressors.tsv')
@@ -244,8 +256,9 @@ for id, input in enumerate(config["_inputs"]):
         # dir-<label>_epi.nii.gz
         # dir-<label>_epi.json (should have PhaseEncodingDirection / TotalReadoutTime / IntendedFor )
 
-        fmap_dest=dest #used later to reset IntendedFor
-        fmap_dir=input_dir #used later to reset IntendedFor
+        # Assume fmaps with 't1' 't2' or 'dwi' tag go with that image, otherwise go with func
+        fmap_dest[id] = dest #used later to reset IntendedFor
+        fmap_dir[id] = input_dir #used later to reset IntendedFor
 
         for key in input["keys"]:
             if not key.endswith("_json"):
@@ -379,11 +392,12 @@ for id, input in enumerate(config["_inputs"]):
         utils.outputSidecar(path+".json", input)
 
 #fix IntendedFor field and PhaseEncodingDirection for fmap json files
-for input in config["_inputs"]:
+num_modalities = {"T1": 0, "T2": 0, "dwi": 0, "func": 0}
+for id, input in enumerate(config["_inputs"]):
     if input["datatype"] == utils.FMAP:
         #set "correct" IntendedFor
-        dest=fmap_dest #does not work with multi input!
-        input_dir=fmap_dir #does not work with multi input!
+        dest=fmap_dest[id]
+        input_dir=fmap_dir[id]
 
         for key in input["keys"]:
             if key.endswith("_json"):
@@ -395,12 +409,30 @@ for input in config["_inputs"]:
                     if os.path.exists(nii_img):
                         direction = utils.determineDir(input, nii_img, nii_key=nii_key)
                         f_json = dest + "_dir-" + direction + "_epi.json"
-                utils.copyJSON(src, f_json, override={"IntendedFor": intended_paths})
+                if 'T1' in config["_inputs"][id]["tags"] or 't1' in config["_inputs"][id]["tags"]:
+                    utils.copyJSON(src, f_json, override={"IntendedFor": intended_paths[T1_ids[num_modalities["T1"]]]})
+                elif 'T2' in config["_inputs"][id]["tags"] or 't2' in config["_inputs"][id]["tags"]:
+                    utils.copyJSON(src, f_json, override={"IntendedFor": intended_paths[T2_ids[num_modalities["T2"]]]})
+                elif 'dwi' in config["_inputs"][id]["tags"] or 'DWI' in config["_inputs"][id]["tags"]:
+                    utils.copyJSON(src, f_json, override={"IntendedFor": intended_paths[dwi_ids[num_modalities["dwi"]]]})
+                else:
+                    utils.copyJSON(src, f_json, override={"IntendedFor": intended_paths[func_ids[num_modalities["func"]]]})
+
                 #fix PhaseEncodingDirection
                 if os.path.exists(nii_img):
                     print(nii_key)
                     updated_pe = utils.correctPE(input, nii_img, nii_key)
                     utils.copyJSON(f_json, f_json, override={"PhaseEncodingDirection": updated_pe})
+
+        if  'T1' in config["_inputs"][id]["tags"] or 't1' in config["_inputs"][id]["tags"]:
+            num_modalities["T1"]+=1
+        elif 'T2' in config["_inputs"][id]["tags"] or 't2' in config["_inputs"][id]["tags"]:
+            num_modalities["T2"]+=1
+        elif 'dwi' in config["_inputs"][id]["tags"] or 'DWI' in config["_inputs"][id]["tags"]:
+            num_modalities["dwi"]+=1
+        else:
+            num_modalities["func"]+=1
+
 
 #generate fake dataset_description.json
 name="brainlife"
